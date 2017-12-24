@@ -33,7 +33,7 @@ struct mplite_link {
 
 /*
  ** Assuming mplite_t.zPool is divided up into an array of mplite_link_t
- ** structures, return a pointer to the idx-th such lik.
+ ** structures, return a pointer to the idx-th such link.
  */
 #define mplite_getlink(handle, idx) ((mplite_link_t *)    \
         (&handle->zPool[(idx) * handle->szAtom]))
@@ -49,7 +49,6 @@ static int mplite_logarithm(const int iValue);
 static int mplite_size(const mplite_t *handle, const void *p);
 static void mplite_link(mplite_t *handle, const int i, const int iLogsize);
 static void mplite_unlink(mplite_t *handle, const int i, const int iLogsize);
-static int mplite_unlink_first(mplite_t *handle, const int iLogsize);
 static void *mplite_malloc_unsafe(mplite_t *handle, const int nByte);
 static void mplite_free_unsafe(mplite_t *handle, const void *pOld);
 
@@ -168,6 +167,75 @@ MPLITE_API void *mplite_realloc(mplite_t *handle, const void *pPrior,
     return p;
 }
 
+// like realloc but will not resize.
+// for compatibility with MM::SetPtrSize
+MPLITE_API int mplite_resize(mplite_t *handle, const void *pPrior,
+                             const int nBytes)
+{
+    int nOld;
+
+    /* Check the parameters */
+    if ((NULL == handle) || (NULL == pPrior) || (nBytes <= 0) ||
+        (nBytes & (nBytes - 1))) {
+        return MPLITE_ERR_INVPAR;
+    }
+
+    nOld = mplite_size(handle, pPrior);
+    if (nBytes <= nOld) {
+        return MPLITE_OK;
+    }
+
+    return MPLITE_ERR_INVPAR; // not really, but ok.
+}
+
+/* return the largest available block size */
+MPLITE_API int mplite_maxmem(mplite_t *handle)
+{
+    unsigned i;
+
+    if (NULL == handle) return 0;
+
+    mplite_enter(handle);
+    for (i = MPLITE_LOGMAX + 1; i; --i)
+    {
+        if (handle->aiFreelist[i - 1] != -1) break;
+    }
+    mplite_leave(handle);
+    if (i) return (1 << (i - 1)) * handle->szAtom;
+    else return 0;
+}
+
+/* return the total available memory */
+MPLITE_API int mplite_freemem(mplite_t *handle)
+{
+    int total;
+    int blocksize;
+    int i;
+
+    if (NULL == handle) return 0;
+
+    total = 0;
+    mplite_enter(handle);
+    for (i = 0, blocksize = 1; i <= MPLITE_LOGMAX; ++i, blocksize <<= 1)
+    {
+        int index = handle->aiFreelist[i];
+
+        while (index != -1)
+        {
+            mplite_link_t *link = mplite_getlink(handle, index);
+            total += blocksize;
+
+            index = link->next;
+        }
+    }
+    mplite_leave(handle);
+
+    return total * handle->szAtom;
+
+    //return handle->szAtom * handle->nBlock - handle->currentOut;
+}
+
+
 MPLITE_API int mplite_roundup(mplite_t *handle, const int n)
 {
     int iFullSz;
@@ -239,19 +307,17 @@ static int mplite_logarithm(const int iValue)
 }
 
 /*
- ** Return the size of an outstanding allocation, in bytes.  The
- ** size returned omits the 8-byte header overhead.  This only
- ** works for chunks that are currently checked out.
+ ** Return the size of an outstanding allocation, in bytes.
+ ** This only works for chunks that are currently checked out.
  */
 static int mplite_size(const mplite_t *handle, const void *p)
 {
-    int iSize = 0;
-    if (p) {
-        int i = ((uint8_t *) p - handle->zPool) / handle->szAtom;
-        assert(i >= 0 && i < handle->nBlock);
-        iSize = handle->szAtom *
-                (1 << (handle->aCtrl[i] & MPLITE_CTRL_LOGSIZE));
-    }
+    int iSize, i;
+    assert( p!=0 );
+    i = (int)((uint8_t *) p - handle->zPool) / handle->szAtom;
+    assert(i >= 0 && i < handle->nBlock);
+    iSize = handle->szAtom * (1 << (handle->aCtrl[i] & MPLITE_CTRL_LOGSIZE));
+
     return iSize;
 }
 
@@ -299,31 +365,12 @@ static void mplite_unlink(mplite_t *handle, const int i, const int iLogsize)
     }
 }
 
-/*
- ** Find the first entry on the freelist iLogsize.  Unlink that
- ** entry and return its index.
- */
-static int mplite_unlink_first(mplite_t *handle, const int iLogsize)
-{
-    int i;
-    int iFirst;
-
-    assert(iLogsize >= 0 && iLogsize <= MPLITE_LOGMAX);
-    i = iFirst = handle->aiFreelist[iLogsize];
-    assert(iFirst >= 0);
-    while (i > 0) {
-        if (i < iFirst) iFirst = i;
-        i = mplite_getlink(handle, i)->next;
-    }
-    mplite_unlink(handle, iFirst, iLogsize);
-    return iFirst;
-}
 
 /*
  ** Return a block of memory of at least nBytes in size.
  ** Return NULL if unable.  Return NULL if nBytes==0.
  **
- ** The caller guarantees that nByte positive.
+ ** The caller guarantees that nByte is positive.
  **
  ** The caller has obtained a lock prior to invoking this
  ** routine so there is never any chance that two or more
@@ -339,17 +386,13 @@ static void *mplite_malloc_unsafe(mplite_t *handle, const int nByte)
     /* nByte must be a positive */
     assert(nByte > 0);
 
+    /* No more than 1GiB per allocation */
+    if( nByte > MPLITE_MAX_ALLOC_SIZE ) return 0;
+
     /* Keep track of the maximum allocation request.  Even unfulfilled
      ** requests are counted */
     if ((uint32_t) nByte > handle->maxRequest) {
         handle->maxRequest = nByte;
-    }
-
-    /* Abort if the requested allocation size is larger than the largest
-     ** power of two that we can represent using 32-bit signed integers.
-     */
-    if (nByte > MPLITE_MAX_ALLOC_SIZE) {
-        return NULL;
     }
 
     /* Round nByte up to the next valid power of two */
@@ -361,13 +404,16 @@ static void *mplite_malloc_unsafe(mplite_t *handle, const int nByte)
      ** block.  If not, then split a block of the next larger power of
      ** two in order to create a new free block of size iLogsize.
      */
-    for (iBin = iLogsize; handle->aiFreelist[iBin] < 0 && iBin <= MPLITE_LOGMAX;
+    for (iBin = iLogsize; iBin <= MPLITE_LOGMAX && handle->aiFreelist[iBin] < 0;
         iBin++) {
     }
     if (iBin > MPLITE_LOGMAX) {
         return NULL;
     }
-    i = mplite_unlink_first(handle, iBin);
+
+    i = handle->aiFreelist[iBin];
+    mplite_unlink(handle, i, iBin);
+
     while (iBin > iLogsize) {
         int newSize;
 
@@ -391,6 +437,12 @@ static void *mplite_malloc_unsafe(mplite_t *handle, const int nByte)
         handle->maxOut = handle->currentOut;
     }
 
+#ifdef MPLITE_DEBUG
+  /* Make sure the allocated memory does not assume that it is set to zero
+  ** or retains a value from a previous allocation */
+  memset(&handle->zPool[i * handle->szAtom], 0xAA, iFullSz);
+#endif
+
     /* Return a pointer to the allocated memory. */
     return (void*) &handle->zPool[i * handle->szAtom];
 }
@@ -406,7 +458,7 @@ static void mplite_free_unsafe(mplite_t *handle, const void *pOld)
     /* Set iBlock to the index of the block pointed to by pOld in
      ** the array of handle->szAtom byte blocks pointed to by handle->zPool.
      */
-    iBlock = ((uint8_t *) pOld - handle->zPool) / handle->szAtom;
+    iBlock = (int)((uint8_t *) pOld - handle->zPool) / handle->szAtom;
 
     /* Check that the pointer pOld points to a valid, non-free block. */
     assert(iBlock >= 0 && iBlock < handle->nBlock);
@@ -431,12 +483,12 @@ static void mplite_free_unsafe(mplite_t *handle, const void *pOld)
         int iBuddy;
         if ((iBlock >> iLogsize) & 1) {
             iBuddy = iBlock - size;
+            assert(iBuddy >= 0);
         }
         else {
             iBuddy = iBlock + size;
+            if (iBuddy >= handle->nBlock) break;
         }
-        assert(iBuddy >= 0);
-        if ((iBuddy + (1 << iLogsize)) > handle->nBlock) break;
         if (handle->aCtrl[iBuddy] != (MPLITE_CTRL_FREE | iLogsize)) break;
         mplite_unlink(handle, iBuddy, iLogsize);
         iLogsize++;
@@ -451,5 +503,12 @@ static void mplite_free_unsafe(mplite_t *handle, const void *pOld)
         }
         size *= 2;
     }
+
+#ifdef MPLITE_DEBUG
+  /* Overwrite freed memory with the 0x55 bit pattern to verify that it is
+  ** not used after being freed */
+  memset(&handle->zPool[iBlock * handle->szAtom], 0x55, size);
+#endif
+
     mplite_link(handle, iBlock, iLogsize);
 }

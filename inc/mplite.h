@@ -17,10 +17,10 @@
  *
  * This memory allocator uses the following algorithm:
  *
- *   1.  All memory allocations sizes are rounded up to a power of 2.
+ *   1.  All memory allocation sizes are rounded up to a power of 2.
  *
  *   2.  If two adjacent free blocks are the halves of a larger block,
- *       then the two blocks are coalesed into the single larger block.
+ *       then the two blocks are coalesced into the single larger block.
  *
  *   3.  New memory is allocated from the first available free block.
  *
@@ -40,11 +40,7 @@
 #ifndef MPLITE_H
 #define MPLITE_H
 
-#ifdef _WIN32
-#include "pstdint.h"
-#else
 #include <stdint.h>
-#endif /* #ifdef _WIN32 */
 
 /**
  * @brief The function call returns success
@@ -114,9 +110,12 @@ typedef struct mplite {
     uint32_t maxCount; /**< Maximum instantaneous currentCount */
     uint32_t maxRequest; /**< Largest allocation (exclusive of internal frag) */
 
-    int aiFreelist[MPLITE_LOGMAX + 1]; /**< List of free blocks. aiFreelist[0]
-        is a list of free blocks of size mplite_t.szAtom. aiFreelist[1] holds
-        blocks of size szAtom * 2 and so forth.*/
+  /**
+   * Lists of free blocks.  aiFreelist[0] is a list of free blocks of
+   * size mplite_t.szAtom.  aiFreelist[1] holds blocks of size szAtom*2.
+   * aiFreelist[2] holds free blocks of size szAtom*4.  And so forth.
+   */
+    int aiFreelist[MPLITE_LOGMAX + 1]; 
 
     uint8_t *aCtrl; /**< Space for tracking which blocks are checked out and the
         size of each block.  One byte per block. */
@@ -192,6 +191,11 @@ MPLITE_API void mplite_free(mplite_t *handle, const void *pPrior);
 MPLITE_API void *mplite_realloc(mplite_t *handle, const void *pPrior,
                                 const int nBytes);
 
+
+MPLITE_API int mplite_resize(mplite_t *handle, const void *pPrior,
+                             const int nBytes);
+
+
 /**
  * @brief Round up a request size to the next valid allocation size.
  * @param[in,out] handle Pointer to an initialized @ref mplite_t object
@@ -214,6 +218,13 @@ MPLITE_API void mplite_print_stats(const mplite_t * const handle,
  * @brief Macro to return the number of times mplite_malloc() has been called.
  */
 #define mplite_alloc_count(handle)    (((handle) != NULL)? (handle)->nAlloc : 0)
+
+
+/* return the largest available block size */
+MPLITE_API int mplite_maxmem(mplite_t *handle);
+
+/* return the total available memory */
+MPLITE_API int mplite_freemem(mplite_t *handle);
 
 #ifdef __cplusplus
 }
