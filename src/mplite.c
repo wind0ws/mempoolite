@@ -167,8 +167,10 @@ MPLITE_API void *mplite_realloc(mplite_t *handle, const void *pPrior,
     return p;
 }
 
-// like realloc but will not resize.
-// for compatibility with MM::SetPtrSize
+/* 
+   like realloc but will not resize.
+   for compatibility with MM::SetPtrSize
+*/
 MPLITE_API int mplite_resize(mplite_t *handle, const void *pPrior,
                              const int nBytes)
 {
@@ -185,7 +187,7 @@ MPLITE_API int mplite_resize(mplite_t *handle, const void *pPrior,
         return MPLITE_OK;
     }
 
-    return MPLITE_ERR_INVPAR; // not really, but ok.
+    return MPLITE_ERR_INVPAR; /* not really, but ok. */
 }
 
 /* return the largest available block size */
@@ -232,7 +234,7 @@ MPLITE_API int mplite_freemem(mplite_t *handle)
 
     return total * handle->szAtom;
 
-    //return handle->szAtom * handle->nBlock - handle->currentOut;
+    /* return handle->szAtom * handle->nBlock - handle->currentOut; */
 }
 
 
